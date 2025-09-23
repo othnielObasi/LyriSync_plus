@@ -1,0 +1,109 @@
+ # ----github/workflows/build.yml
+name: build-windows
+
+on:
+  push:
+    tags:
+      - 'v*'         # e.g. v1.0.0
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # ---- CHANGE THESE IF YOUR NAMES DIFFER ----
+      APP_DIR: lyrisync_plus             # folder that contains main.py, .spec, .nsi
+      SPEC_FILE: lyrisync_plus.spec      # your PyInstaller spec file
+      EXE_NAME: LyriSyncPlus             # folder under dist/ and the exe base name
+      NSIS_FILE: LyriSyncPlus.nsi        # your NSIS script
+      # -------------------------------------------
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify expected files & folders exist
+        shell: pwsh
+        run: |
+          Write-Host "Repo root:" (Get-Location)
+          if (-not (Test-Path $env:APP_DIR)) { throw "APP_DIR '$env:APP_DIR' not found at repo root." }
+          if (-not (Test-Path "$env:APP_DIR\$env:SPEC_FILE")) { throw "Spec '$env:SPEC_FILE' not found in $env:APP_DIR." }
+          if (-not (Test-Path "$env:APP_DIR\$env:NSIS_FILE")) { throw "NSIS '$env:NSIS_FILE' not found in $env:APP_DIR." }
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) {
+            pip install -r requirements.txt
+          } else {
+            # Safe defaults if you don't ship a requirements.txt
+            pip install aiohttp websockets ttkbootstrap PyYAML Pillow flask
+          }
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          pyinstaller "$env:SPEC_FILE" --noconfirm --clean
+          if (-not (Test-Path ".\dist\$env:EXE_NAME")) { throw "PyInstaller output dist\$env:EXE_NAME not found." }
+          if (-not (Test-Path ".\dist\$env:EXE_NAME\$env:EXE_NAME.exe")) {
+            throw "Expected main exe '.\dist\$env:EXE_NAME\$env:EXE_NAME.exe' missing. Check your .spec 'name=' and EXE naming."
+          }
+          Get-ChildItem -Recurse ".\dist\$env:EXE_NAME" | Format-List -Property FullName
+
+      - name: Upload portable build (unzipped folder)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.EXE_NAME }}-portable
+          path: ${{ env.APP_DIR }}/dist/${{ env.EXE_NAME }}/**/*
+          if-no-files-found: error
+
+      # -------- NSIS installer --------
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis -y
+          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $nsis)) { throw "NSIS makensis.exe not found at $nsis" }
+
+      - name: Compile Installer (NSIS)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          $src  = (Resolve-Path ".\dist\$env:EXE_NAME").Path
+          if (-not (Test-Path $src)) { throw "SourceDir '$src' missing." }
+
+          # Use tag (v1.2.3) if present, else 'dev'
+          $ver = "${{ github.ref_name }}"
+          if (-not $ver -or $ver -eq '') { $ver = "dev" }
+
+          # If you don't ship app.ico it's fine; the script will still compile
+          & $nsis "/DSourceDir=$src" "/DVersion=$ver" "$env:NSIS_FILE"
+          if ($LASTEXITCODE -ne 0) { throw "NSIS failed with exit code $LASTEXITCODE" }
+
+          # List produced installer(s)
+          Get-ChildItem -Filter "*.exe" | Format-List -Property FullName,Length,CreationTime
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.EXE_NAME }}-installer
+          path: ${{ env.APP_DIR }}/*.exe
+          if-no-files-found: error
