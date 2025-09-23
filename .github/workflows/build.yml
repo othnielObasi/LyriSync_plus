@@ -1,109 +1,150 @@
  # ----github/workflows/build.yml
-name: build-windows
+name: Build Windows Installer
 
 on:
-  push:
-    tags:
-      - 'v*'         # e.g. v1.0.0
   workflow_dispatch:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+      - 'release-*'
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
-    env:
-      # ---- CHANGE THESE IF YOUR NAMES DIFFER ----
-      APP_DIR: lyrisync_plus             # folder that contains main.py, .spec, .nsi
-      SPEC_FILE: lyrisync_plus.spec      # your PyInstaller spec file
-      EXE_NAME: LyriSyncPlus             # folder under dist/ and the exe base name
-      NSIS_FILE: LyriSyncPlus.nsi        # your NSIS script
-      # -------------------------------------------
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify expected files & folders exist
-        shell: pwsh
-        run: |
-          Write-Host "Repo root:" (Get-Location)
-          if (-not (Test-Path $env:APP_DIR)) { throw "APP_DIR '$env:APP_DIR' not found at repo root." }
-          if (-not (Test-Path "$env:APP_DIR\$env:SPEC_FILE")) { throw "Spec '$env:SPEC_FILE' not found in $env:APP_DIR." }
-          if (-not (Test-Path "$env:APP_DIR\$env:NSIS_FILE")) { throw "NSIS '$env:NSIS_FILE' not found in $env:APP_DIR." }
-
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~\AppData\Local\pip\Cache
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install Python dependencies
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
+      - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) {
-            pip install -r requirements.txt
-          } else {
-            # Safe defaults if you don't ship a requirements.txt
-            pip install aiohttp websockets ttkbootstrap PyYAML Pillow flask
-          }
+          # Move into the code directory (where requirements.txt lives)
+          Set-Location "$env:GITHUB_WORKSPACE\lyrisync_plus\lyrisync_plus"
+          pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build with PyInstaller
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
+      - name: PyInstaller build
         run: |
-          pyinstaller "$env:SPEC_FILE" --noconfirm --clean
-          if (-not (Test-Path ".\dist\$env:EXE_NAME")) { throw "PyInstaller output dist\$env:EXE_NAME not found." }
-          if (-not (Test-Path ".\dist\$env:EXE_NAME\$env:EXE_NAME.exe")) {
-            throw "Expected main exe '.\dist\$env:EXE_NAME\$env:EXE_NAME.exe' missing. Check your .spec 'name=' and EXE naming."
+          $Root      = "$env:GITHUB_WORKSPACE"
+          $CodeDir   = Join-Path $Root 'lyrisync_plus\lyrisync_plus'
+          $IconPath  = Join-Path $CodeDir 'iconLyriSync.ico'
+          $Splash    = Join-Path $CodeDir 'splash.png'
+          $Readme    = Join-Path $CodeDir 'README.md'
+          $Cfg       = Join-Path $CodeDir 'lyrisync_config.yaml'
+
+          Set-Location $CodeDir
+
+          # Build exe (windowed, name LyriSyncPlus)
+          # Include common hidden imports to avoid runtime missing modules
+          $addDataArgs = @()
+          if (Test-Path $Splash) { $addDataArgs += @('--add-data', 'splash.png;.') }
+          if (Test-Path $IconPath) {
+            pyinstaller --noconfirm --clean `
+              --name "LyriSyncPlus" `
+              --windowed `
+              --icon "$IconPath" `
+              --hidden-import websockets `
+              --hidden-import aiohttp `
+              main.py `
+              @addDataArgs
+          } else {
+            pyinstaller --noconfirm --clean `
+              --name "LyriSyncPlus" `
+              --windowed `
+              --hidden-import websockets `
+              --hidden-import aiohttp `
+              main.py `
+              @addDataArgs
           }
-          Get-ChildItem -Recurse ".\dist\$env:EXE_NAME" | Format-List -Property FullName
 
-      - name: Upload portable build (unzipped folder)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.EXE_NAME }}-portable
-          path: ${{ env.APP_DIR }}/dist/${{ env.EXE_NAME }}/**/*
-          if-no-files-found: error
+          # Copy extras to dist folder (optional, won’t fail if missing)
+          $DistApp = Join-Path $CodeDir 'dist\LyriSyncPlus'
+          if (Test-Path $Readme) { Copy-Item $Readme -Destination $DistApp -Force }
+          if (Test-Path $Cfg)    { Copy-Item $Cfg    -Destination $DistApp -Force }
+          if (Test-Path $IconPath) { Copy-Item $IconPath -Destination $DistApp -Force }
 
-      # -------- NSIS installer --------
-      - name: Install NSIS
-        shell: pwsh
+          if (-not (Test-Path (Join-Path $DistApp 'LyriSyncPlus.exe'))) {
+            Write-Error "LyriSyncPlus.exe not found in $DistApp"
+            exit 1
+          }
+
+      - name: Install NSIS & Inno Setup
         run: |
-          choco install nsis -y
-          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
-          if (-not (Test-Path $nsis)) { throw "NSIS makensis.exe not found at $nsis" }
+          choco install nsis innosetup -y
+          $nsisPath = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          $isccPath = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $nsisPath)) { throw "NSIS not found at $nsisPath" }
+          if (-not (Test-Path $isccPath)) { throw "Inno Setup not found at $isccPath" }
 
-      - name: Compile Installer (NSIS)
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
+      - name: Build NSIS installer
         run: |
-          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
-          $src  = (Resolve-Path ".\dist\$env:EXE_NAME").Path
-          if (-not (Test-Path $src)) { throw "SourceDir '$src' missing." }
+          $Root     = "$env:GITHUB_WORKSPACE"
+          $CodeDir  = Join-Path $Root 'lyrisync_plus\lyrisync_plus'
+          $DistApp  = Join-Path $CodeDir 'dist\LyriSyncPlus'
+          $OutDir   = Join-Path $CodeDir 'dist\installer'
+          New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-          # Use tag (v1.2.3) if present, else 'dev'
+          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+
+          # Use ref name or fallback for version stamp
           $ver = "${{ github.ref_name }}"
-          if (-not $ver -or $ver -eq '') { $ver = "dev" }
+          if (-not $ver) { $ver = "main" }
 
-          # If you don't ship app.ico it's fine; the script will still compile
-          & $nsis "/DSourceDir=$src" "/DVersion=$ver" "$env:NSIS_FILE"
+          # NSIS script expected at repo root (LyriSyncPlus.nsi)
+          $nsiScript = Join-Path $Root 'LyriSyncPlus.nsi'
+          if (-not (Test-Path $nsiScript)) {
+            throw "NSIS script not found at $nsiScript"
+          }
+
+          # Call NSIS with /D overrides (no double-define errors)
+          & $nsis `
+            "/DSourceDir=$DistApp" `
+            "/DAPP_VERSION=$ver" `
+            "/DOutputDir=$OutDir" `
+            "$nsiScript"
+
           if ($LASTEXITCODE -ne 0) { throw "NSIS failed with exit code $LASTEXITCODE" }
 
-          # List produced installer(s)
-          Get-ChildItem -Filter "*.exe" | Format-List -Property FullName,Length,CreationTime
+      - name: Build Inno Setup installer
+        run: |
+          $Root     = "$env:GITHUB_WORKSPACE"
+          $CodeDir  = Join-Path $Root 'lyrisync_plus\lyrisync_plus'
+          $DistApp  = Join-Path $CodeDir 'dist\LyriSyncPlus'
+          $iscc     = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
 
-      - name: Upload installer
+          $ver = "${{ github.ref_name }}"
+          if (-not $ver) { $ver = "main" }
+
+          # Inno script expected at repo root (installer_inno.iss)
+          $issScript = Join-Path $Root 'installer_inno.iss'
+          if (-not (Test-Path $issScript)) {
+            throw "Inno Setup script not found at $issScript"
+          }
+
+          & $iscc "/DSourceDir=$DistApp" "/DMyAppVersion=$ver" "$issScript"
+
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+
+      - name: Upload PyInstaller app (dist/LyriSyncPlus)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.EXE_NAME }}-installer
-          path: ${{ env.APP_DIR }}/*.exe
-          if-no-files-found: error
+          name: LyriSyncPlus-dist
+          path: lyriSync_plus/lyrisync_plus/dist/LyriSyncPlus
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: LyriSyncPlus-installers
+          path: |
+            lyrisync_plus/lyrisync_plus/dist/installer/*.exe
+            lyrisync_plus/lyrisync_plus/dist/*.exe
