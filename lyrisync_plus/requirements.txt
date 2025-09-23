@@ -1,0 +1,6 @@
+aiohttp>=3.9
+websockets>=12
+ttkbootstrap>=1.10
+PyYAML>=6.0
+Pillow>=9.0
+flask>=2.2

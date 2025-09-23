@@ -1,0 +1,52 @@
+# =========================
+# LyriSync+ Configuration
+# =========================
+
+# --- Optional Stream Deck / role bindings (managed in GUI) ---
+roles: []
+# Example if you add from GUI later:
+# roles:
+#   - name: "Lyrics Op"
+#     decks: [0]
+#     buttons:
+#       "0": show_lyrics
+#       "1": clear_lyrics
+#       "2": toggle_overlay
+#   - name: "Broadcast"
+#     decks: [1]
+#     buttons:
+#       "0": start_recording
+#       "1": stop_recording
+
+# --- Global behavior/settings (shown in Settings dialog) ---
+settings:
+  api_port: 5000                 # Local HTTP API port for REST control
+  poll_interval_sec: 2           # How often to poll vMix status (sec)
+  auto_clear_idle_sec: 0         # Auto-clear after X seconds of no new text (0=off)
+  max_chars_per_line: 48         # Soft wrap per line for title text
+  auto_overlay_on_send: true     # Overlay In automatically when sending lyrics
+  auto_overlay_out_on_clear: true# Overlay Out automatically when cleared
+  overlay_always_on: false       # Keep overlay On; send blank text instead of overlay out
+  overlay_channel: 1             # vMix overlay channel (1–4)
+  clear_on_blank: true           # Clear text when OpenLP slide is blank
+  splash_enabled: true           # Show splash on startup
+
+# --- UI theme (changed from the app’s Theme dropdown) ---
+ui:
+  theme: darkly
+
+# --- Multi-connection OpenLP ⇄ vMix bridges ---
+# Add as many connections as you need. Each connection:
+#  - connects to one OpenLP instance (IP + ports)
+#  - sends the slide text to one or more vMix inputs/fields
+connections:
+  - name: "Connection 1"
+    openlp_ip: "127.0.0.1"       # OpenLP machine IP (use LAN IP if remote)
+    http_port: 4316              # OpenLP HTTP API port
+    ws_port: 4317                # OpenLP WebSocket port
+    vmix_api_url: "http://localhost:8088/api"  # vMix API endpoint
+    mappings:
+      - input: "VerseDisplay"    # vMix title input name
+        field: "LyricsCenter.Text"  # Field on that title to receive text
+      - input: "LowerThird"
+        field: "LowerThird.Text"
