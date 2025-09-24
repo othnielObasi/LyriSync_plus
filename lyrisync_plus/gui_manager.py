@@ -29,23 +29,17 @@ CONFIG_FILE = "lyrisync_config.yaml"
 # Config helpers
 # =======================
 def _default_config() -> Dict[str, Any]:
-    """
-    Defaults match your consolidated YAML:
-      - top-level 'connections' (preferred)
-      - plus legacy single-endpoint fields in 'settings' (for backward compatibility)
-    """
     return {
         "roles": [],
         "ui": {"theme": "darkly"},
         "settings": {
-            # legacy single-endpoint fields (main.py can still read these)
+            # legacy single-connection fields are still supported/used by main.py
             "vmix_api_url": "http://localhost:8088/api",
-            "openlp_ws_url": "ws://localhost:4317",   # legacy single WS entry
+            "openlp_ws_url": "ws://localhost:4317",
+            "api_port": 5000,
             "vmix_title_input": "SongTitle",
             "vmix_title_field": "Message.Text",
 
-            # global behavior
-            "api_port": 5000,
             "splash_enabled": True,
             "poll_interval_sec": 2,
             "overlay_channel": 1,
@@ -53,14 +47,13 @@ def _default_config() -> Dict[str, Any]:
             "auto_overlay_out_on_clear": True,
             "overlay_always_on": False,
             "auto_clear_idle_sec": 0,
-            "max_chars_per_line": 36,   # conservative default wrap
+            "max_chars_per_line": 36,        # conservative default wrap
             "clear_on_blank": True,
-            "text_layer_above": False,  # optional vMix title layer behavior
+            "text_layer_above": False,       # optional vMix title layer behavior
 
-            # NOTE: connections now live at TOP-LEVEL; this remains only for backward compat.
-        },
-        # --- PREFERRED location for multi-connection bridge config ---
-        "connections": []  # list of { name, openlp_ip, http_port, ws_port, vmix_api_url, mappings: [{input, field}, ...] }
+            # NEW: multi-connection list (each connection has openlp/vmix + mappings)
+            "connections": []
+        }
     }
 
 
@@ -72,15 +65,10 @@ def load_config() -> Dict[str, Any]:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         base = _default_config()
-        # shallow merge first
-        base.update({k: v for k, v in data.items() if k != "ui" and k != "settings" and k != "connections"})
-        # nested merges for ui, settings
+        base.update(data)
         base["ui"] = {**_default_config()["ui"], **(data.get("ui") or {})}
         base["settings"] = {**_default_config()["settings"], **(data.get("settings") or {})}
-        # top-level connections (preferred)
-        base["connections"] = list(data.get("connections") or [])
-        # roles
-        base["roles"] = list(data.get("roles") or [])
+        base["roles"] = data.get("roles") or []
         return base
     except Exception as e:
         logger.error("Failed to load config: %s", e)
@@ -162,15 +150,143 @@ class AsyncVmixDiscoverer:
 
 
 # =======================
+# Connection Editor (used in tab + settings)
+# =======================
+class ConnectionEditorDialog:
+    """
+    Quick editor for one OpenLP→vMix connection with mappings.
+    Produces/edits a dict compatible with settings['connections'].
+    """
+    def __init__(self, parent, on_save: Callable[[Dict[str, Any]], None], seed: Optional[Dict[str, Any]] = None):
+        self.parent = parent
+        self.on_save = on_save
+        seed = seed or {}
+        self.win: Optional[tk.Toplevel] = None
+
+        # basic fields
+        self.name_var = tk.StringVar(value=seed.get("name", "Connection"))
+        self.openlp_ip_var = tk.StringVar(value=seed.get("openlp_ip", "127.0.0.1"))
+        self.http_port_var = tk.StringVar(value=str(seed.get("http_port", 4316)))
+        self.ws_port_var = tk.StringVar(value=str(seed.get("ws_port", 4317)))
+        self.vmix_api_var = tk.StringVar(value=seed.get("vmix_api_url", "http://localhost:8088/api"))
+
+        # mappings list: list[{"input": "...", "field": "..."}]
+        self._mappings: List[Dict[str, str]] = list(seed.get("mappings", []))
+
+    def show(self):
+        self.win = tk.Toplevel(self.parent)
+        self.win.title("Connection")
+        self.win.geometry("560x500")
+        self.win.transient(self.parent)
+        self.win.grab_set()
+
+        frm = ttk.Frame(self.win, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        r = 0
+        ttk.Label(frm, text="Name:").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.name_var, width=30).grid(row=r, column=1, sticky="w", padx=6); r+=1
+
+        ttk.Label(frm, text="OpenLP IP:").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.openlp_ip_var, width=18).grid(row=r, column=1, sticky="w", padx=6); r+=1
+
+        ttk.Label(frm, text="HTTP Port:").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.http_port_var, width=10).grid(row=r, column=1, sticky="w", padx=6); r+=1
+
+        ttk.Label(frm, text="WS Port:").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.ws_port_var, width=10).grid(row=r, column=1, sticky="w", padx=6); r+=1
+
+        ttk.Label(frm, text="vMix API URL:").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.vmix_api_var, width=36).grid(row=r, column=1, sticky="w", padx=6); r+=1
+
+        # mappings section
+        sep = ttk.Separator(frm); sep.grid(row=r, column=0, columnspan=2, sticky="ew", pady=(8,6)); r+=1
+        ttk.Label(frm, text="Mappings (vMix Input → Field)").grid(row=r, column=0, columnspan=2, sticky="w", pady=(0,6)); r+=1
+
+        map_frame = ttk.Frame(frm); map_frame.grid(row=r, column=0, columnspan=2, sticky="nsew")
+        frm.rowconfigure(r, weight=1); frm.columnconfigure(1, weight=1)
+
+        cols = ("input", "field")
+        self.map_tree = ttk.Treeview(map_frame, columns=cols, show="headings", height=6)
+        for c in cols:
+            self.map_tree.heading(c, text=c.capitalize())
+            self.map_tree.column(c, width=200 if c=="input" else 250, stretch=True)
+        self.map_tree.pack(side="left", fill="both", expand=True)
+
+        for m in self._mappings:
+            self.map_tree.insert("", "end", values=(m.get("input",""), m.get("field","")))
+
+        yscroll = ttk.Scrollbar(map_frame, orient="vertical", command=self.map_tree.yview)
+        self.map_tree.configure(yscrollcommand=yscroll.set)
+        yscroll.pack(side="right", fill="y")
+
+        ctrl = ttk.Frame(frm); ctrl.grid(row=r+1, column=0, columnspan=2, sticky="w", pady=(6,0))
+        in_var = tk.StringVar(); field_var = tk.StringVar()
+        ttk.Entry(ctrl, textvariable=in_var, width=20).pack(side="left", padx=(0,6))
+        ttk.Entry(ctrl, textvariable=field_var, width=24).pack(side="left", padx=(0,6))
+        ttk.Button(ctrl, text="Add", command=lambda:self._add_map(in_var, field_var)).pack(side="left")
+        ttk.Button(ctrl, text="Delete Selected", command=self._del_selected_map).pack(side="left", padx=6)
+
+        btns = ttk.Frame(frm); btns.grid(row=r+2, column=0, columnspan=2, sticky="e", pady=12)
+        ttk.Button(btns, text="Save", command=self._save, bootstyle=SUCCESS).pack(side="left", padx=6)
+        ttk.Button(btns, text="Cancel", command=self.win.destroy).pack(side="left")
+
+    def _add_map(self, in_var: tk.StringVar, field_var: tk.StringVar):
+        i = (in_var.get() or "").strip()
+        f = (field_var.get() or "").strip()
+        if not i or not f:
+            messagebox.showerror("Mapping", "Both Input and Field are required.")
+            return
+        self.map_tree.insert("", "end", values=(i, f))
+        in_var.set(""); field_var.set("")
+
+    def _del_selected_map(self):
+        for iid in self.map_tree.selection():
+            self.map_tree.delete(iid)
+
+    def _save(self):
+        try:
+            name = (self.name_var.get() or "").strip()
+            if not name:
+                raise ValueError("Name is required.")
+            ip = (self.openlp_ip_var.get() or "").strip()
+            http_port = int(self.http_port_var.get() or "4316")
+            ws_port = int(self.ws_port_var.get() or "4317")
+            vmix_api = (self.vmix_api_var.get() or "").strip()
+            if not vmix_api.startswith("http://") and not vmix_api.startswith("https://"):
+                raise ValueError("vMix API URL must start with http:// or https://")
+
+            mappings: List[Dict[str,str]] = []
+            for iid in self.map_tree.get_children():
+                v = self.map_tree.item(iid, "values")
+                mappings.append({"input": v[0], "field": v[1]})
+            if not mappings:
+                raise ValueError("Add at least one mapping (Input → Field).")
+
+            payload = {
+                "name": name,
+                "openlp_ip": ip,
+                "http_port": http_port,
+                "ws_port": ws_port,
+                "vmix_api_url": vmix_api,
+                "mappings": mappings,
+            }
+            self.on_save(payload)
+            self.win.destroy()
+        except Exception as e:
+            messagebox.showerror("Save Connection", str(e))
+
+
+# =======================
 # GUI
 # =======================
 class LyriSyncGUI:
     """
     LyriSync+ GUI
     - Roles tab: manage StreamDeck role mappings.
+    - Connections tab: add/edit/delete OpenLP→vMix connections (with mappings).
     - Live Status tab: test lyrics (multiline + auto-grow), overlay, recording.
-    - Settings dialog: configure vMix, OpenLP, API, overlays, import JSON connections.
-    - Works with top-level 'connections' in the YAML (preferred).
+    - Settings dialog: configure legacy single-connection settings + Quick Add + JSON import.
     """
 
     def __init__(
@@ -186,19 +302,17 @@ class LyriSyncGUI:
         self.action_callback = action_callback
 
         self.discoverer = AsyncVmixDiscoverer()
-        self._vmix_inputs: List[str] = []
-        self._fields_by_input: Dict[str, List[str]] = {}
 
         # Window
         self.master.title("LyriSync+")
-        self.master.geometry("980x640")
-        self.master.minsize(820, 540)
+        self.master.geometry("1024x680")
+        self.master.minsize(880, 560)
 
         # Theme
         initial_theme = (self.config.get("ui") or {}).get("theme", "darkly")
         self.style = tb.Style(initial_theme)
 
-        # Async loop for discovery/tasks
+        # Async loop for discovery/tasks (used by discover/test vMix)
         self.loop = asyncio.new_event_loop()
         self.async_thread = threading.Thread(target=self._run_async_loop, daemon=True)
         self.async_thread.start()
@@ -208,6 +322,8 @@ class LyriSyncGUI:
 
         # Roles initial fill
         self.refresh_roles_list()
+        # Connections initial fill
+        self.refresh_connections_list()
 
         # Close handling
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -265,11 +381,15 @@ class LyriSyncGUI:
         notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
         self.roles_frame = ttk.Frame(notebook)
+        self.connections_frame = ttk.Frame(notebook)
         self.status_frame = ttk.Frame(notebook)
+
         notebook.add(self.roles_frame, text="🎭 Roles & Decks")
+        notebook.add(self.connections_frame, text="🔗 Connections")
         notebook.add(self.status_frame, text="📡 Live Status")
 
         self._build_roles_tab()
+        self._build_connections_tab()
         self._build_status_tab()
 
     def _led_group(self, parent: ttk.Frame, caption: str) -> ttk.Label:
@@ -377,6 +497,129 @@ class LyriSyncGUI:
         save_config(self.config)
 
     # -------------------
+    # Connections tab
+    # -------------------
+    def _build_connections_tab(self):
+        wrap = ttk.Frame(self.connections_frame)
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+
+        yscroll = ttk.Scrollbar(wrap)
+        yscroll.pack(side="right", fill="y")
+
+        self.conn_tree = ttk.Treeview(
+            wrap,
+            columns=("Name", "OpenLP", "Ports", "vMix API", "Mappings"),
+            show="headings",
+            height=14,
+            yscrollcommand=yscroll.set,
+        )
+        yscroll.config(command=self.conn_tree.yview)
+
+        self.conn_tree.heading("Name", text="Name")
+        self.conn_tree.heading("OpenLP", text="OpenLP IP")
+        self.conn_tree.heading("Ports", text="HTTP/WS")
+        self.conn_tree.heading("vMix API", text="vMix API URL")
+        self.conn_tree.heading("Mappings", text="Mappings")
+
+        self.conn_tree.column("Name", width=160)
+        self.conn_tree.column("OpenLP", width=120)
+        self.conn_tree.column("Ports", width=100)
+        self.conn_tree.column("vMix API", width=260)
+        self.conn_tree.column("Mappings", width=320)
+
+        self.conn_tree.pack(fill="both", expand=True)
+
+        btns = ttk.Frame(self.connections_frame)
+        btns.pack(pady=(6, 4))
+
+        ttk.Button(btns, text="➕ Add", command=self._add_connection).pack(side="left", padx=5)
+        ttk.Button(btns, text="✏️ Edit", command=self._edit_connection).pack(side="left", padx=5)
+        ttk.Button(btns, text="❌ Delete", command=self._delete_connection, bootstyle=DANGER).pack(side="left", padx=5)
+        ttk.Button(btns, text="📥 Import JSON…", command=self._import_connections_json, bootstyle=INFO).pack(side="left", padx=5)
+        ttk.Button(btns, text="💾 Save", command=self._save_connections, bootstyle=SUCCESS).pack(side="left", padx=5)
+
+    def refresh_connections_list(self):
+        try:
+            for iid in self.conn_tree.get_children():
+                self.conn_tree.delete(iid)
+            conns = self.config.get("settings", {}).get("connections", []) or []
+            for c in conns:
+                maps = ", ".join([f"{m.get('input','')}→{m.get('field','')}" for m in c.get("mappings", [])])
+                ports = f"{c.get('http_port',4316)}/{c.get('ws_port',4317)}"
+                self.conn_tree.insert(
+                    "", "end",
+                    values=(
+                        c.get("name", "Connection"),
+                        c.get("openlp_ip", "127.0.0.1"),
+                        ports,
+                        c.get("vmix_api_url", ""),
+                        maps
+                    )
+                )
+        except Exception as e:
+            logger.error("Refresh connections failed: %s", e)
+            messagebox.showerror("Connections Error", f"Failed to refresh connections:\n{e}")
+
+    def _add_connection(self):
+        def _on_save(new_conn: Dict[str, Any]):
+            self.config["settings"].setdefault("connections", []).append(new_conn)
+            self.refresh_connections_list()
+        ConnectionEditorDialog(self.master, on_save=_on_save).show()
+
+    def _edit_connection(self):
+        sel = self.conn_tree.selection()
+        if not sel:
+            messagebox.showwarning("Select", "Select a connection to edit.")
+            return
+        idx = self.conn_tree.index(sel[0])
+        conns = self.config["settings"].get("connections", [])
+        if idx >= len(conns):
+            return
+        def _on_save(updated: Dict[str, Any]):
+            conns[idx] = updated
+            self.refresh_connections_list()
+        ConnectionEditorDialog(self.master, on_save=_on_save, seed=conns[idx]).show()
+
+    def _delete_connection(self):
+        sel = self.conn_tree.selection()
+        if not sel:
+            return
+        idx = self.conn_tree.index(sel[0])
+        conns = self.config["settings"].get("connections", [])
+        if idx >= len(conns):
+            return
+        name = conns[idx].get("name", "Connection")
+        if messagebox.askyesno("Confirm Delete", f"Delete connection '{name}'?"):
+            del conns[idx]
+            self.refresh_connections_list()
+
+    def _import_connections_json(self):
+        path = filedialog.askopenfilename(
+            title="Select JSON config",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and "connections" in data:
+                conns = data["connections"]
+            else:
+                conns = data
+            if not isinstance(conns, list):
+                raise ValueError('JSON must be a list of connection objects or {"connections": [...]}')
+            self.config["settings"]["connections"] = conns
+            self.refresh_connections_list()
+            messagebox.showinfo("Import JSON", f"Loaded {len(conns)} connection(s). Click Save to persist.")
+        except Exception as e:
+            messagebox.showerror("Import JSON", f"Failed to import:\n{e}")
+
+    def _save_connections(self):
+        if save_config(self.config):
+            messagebox.showinfo("Connections", "Connections saved to config.")
+
+    # -------------------
     # Status tab (multiline Test Lyrics + auto-grow)
     # -------------------
     def _build_status_tab(self):
@@ -386,14 +629,14 @@ class LyriSyncGUI:
 
         ttk.Label(test, text="Test Lyrics:").grid(row=0, column=0, sticky="nw", pady=(5, 0))
 
-        # Multiline Text with scrollbar (double width, short height; auto-grows up to 6)
+        # Multiline Text with scrollbar
         text_wrap_frame = ttk.Frame(test)
         text_wrap_frame.grid(row=0, column=1, sticky="nsew", padx=6, pady=5)
 
         self._lyrics_text = tk.Text(
             text_wrap_frame,
-            height=2,               # start at 2 lines
-            width=84,               # wider
+            height=2,               # start at 2 lines (shorter)
+            width=58,               # wider typing area
             wrap="word",
             font=("Segoe UI", 10)
         )
@@ -472,6 +715,9 @@ class LyriSyncGUI:
         if callable(self.action_callback):
             self.action_callback("clear_lyrics")
 
+    # -------------------
+    # LED + connection updates (called from main)
+    # -------------------
     def set_recording(self, is_on: bool):
         self.thread_safe(self._rec_led.configure, foreground="#2ca34a" if is_on else "#c43c3c")
 
@@ -486,15 +732,13 @@ class LyriSyncGUI:
             self.thread_safe(self._openlp_led.configure, foreground="#2ca34a" if openlp_ok else "#c43c3c")
             self.thread_safe(self.openlp_status_var.set, "Connected" if openlp_ok else "Disconnected")
 
+    # -------------------
+    # Settings
+    # -------------------
     def open_settings_dialog(self):
         SettingsDialog(self.master, self.config, self.discoverer, self._apply_settings).show()
 
     def _apply_settings(self, new_settings: Dict[str, Any]):
-        """
-        Called by SettingsDialog on Save. We save 'settings' here.
-        The dialog itself updates top-level 'connections' directly on the config
-        BEFORE calling this, so a single save writes both.
-        """
         self.config["settings"] = new_settings
         save_config(self.config)
 
@@ -585,12 +829,8 @@ class SettingsDialog:
         self.window: Optional[tk.Toplevel] = None
 
         s = self.config.get("settings", {})
-
-        # Back-compat single-endpoint vMix/OpenLP fields
         self.vmix_api_var = tk.StringVar(value=s.get("vmix_api_url", "http://localhost:8088/api"))
         self.openlp_ws_var = tk.StringVar(value=s.get("openlp_ws_url", "ws://localhost:4317"))
-
-        # General/global fields
         self.api_port_var = tk.StringVar(value=str(s.get("api_port", 5000)))
         self.input_var = tk.StringVar(value=s.get("vmix_title_input", "SongTitle"))
         self.field_var = tk.StringVar(value=s.get("vmix_title_field", "Message.Text"))
@@ -605,21 +845,21 @@ class SettingsDialog:
         self.cob_var = tk.BooleanVar(value=bool(s.get("clear_on_blank", True)))
         self.text_layer_above_var = tk.BooleanVar(value=bool(s.get("text_layer_above", False)))
 
-        # PREFERRED multi-connection block (TOP-LEVEL)
-        self.connections: List[Dict[str, Any]] = list(self.config.get("connections", []))
+        # connections viewer (imported JSON lives here until Save)
+        self.connections: List[Dict[str, Any]] = list(s.get("connections", []))
 
     def show(self):
         self.window = tk.Toplevel(self.parent)
         self.window.title("Settings")
-        self.window.geometry("820x720")
+        self.window.geometry("800x740")
         self.window.transient(self.parent)
         self.window.grab_set()
 
         main = ttk.Frame(self.window, padding=12)
         main.pack(fill="both", expand=True)
 
-        # vMix (single-endpoint legacy/testing)
-        ttk.Label(main, text="vMix (Single-Endpoint / Legacy)", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+        # vMix
+        ttk.Label(main, text="vMix Settings", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
         ttk.Label(main, text="vMix API URL:").grid(row=1, column=0, sticky="w", pady=5)
         ttk.Entry(main, textvariable=self.vmix_api_var, width=44).grid(row=1, column=1, sticky="ew", padx=6)
 
@@ -632,17 +872,17 @@ class SettingsDialog:
         self.field_combo = ttk.Combobox(main, textvariable=self.field_var, state="readonly", width=30)
         self.field_combo.grid(row=3, column=1, sticky="ew", padx=6)
 
-        # OpenLP (single-endpoint legacy/testing)
-        ttk.Label(main, text="OpenLP (Single-Endpoint / Legacy)", font=("Segoe UI", 12, "bold")).grid(row=4, column=0, columnspan=4, sticky="w", pady=(18, 10))
+        # OpenLP
+        ttk.Label(main, text="OpenLP Settings", font=("Segoe UI", 12, "bold")).grid(row=4, column=0, columnspan=4, sticky="w", pady=(18, 10))
         ttk.Label(main, text="OpenLP WS URL:").grid(row=5, column=0, sticky="w", pady=5)
         ttk.Entry(main, textvariable=self.openlp_ws_var, width=44).grid(row=5, column=1, sticky="ew", padx=6)
 
         # API
-        ttk.Label(main, text="API / App Settings", font=("Segoe UI", 12, "bold")).grid(row=6, column=0, columnspan=4, sticky="w", pady=(18, 10))
+        ttk.Label(main, text="API Settings", font=("Segoe UI", 12, "bold")).grid(row=6, column=0, columnspan=4, sticky="w", pady=(18, 10))
         ttk.Label(main, text="LyriSync+ API Port:").grid(row=7, column=0, sticky="w", pady=5)
         ttk.Entry(main, textvariable=self.api_port_var, width=10).grid(row=7, column=1, sticky="w", padx=6)
 
-        # Overlay behavior
+        # Overlay
         ttk.Label(main, text="Overlay Settings", font=("Segoe UI", 12, "bold")).grid(row=8, column=0, columnspan=4, sticky="w", pady=(18, 10))
         ttk.Label(main, text="Overlay Channel (1-4):").grid(row=9, column=0, sticky="w", pady=5)
         ttk.Combobox(main, textvariable=self.overlay_var, values=["1", "2", "3", "4"], state="readonly", width=6).grid(row=9, column=1, sticky="w", padx=6)
@@ -664,14 +904,14 @@ class SettingsDialog:
         ttk.Label(main, text="Poll Interval (sec):").grid(row=18, column=0, sticky="w", pady=5)
         ttk.Entry(main, textvariable=self.poll_var, width=10).grid(row=18, column=1, sticky="w", padx=6)
 
-        # JSON import/export for multi-connection
+        # JSON / Quick Add
         sep = ttk.Separator(main); sep.grid(row=19, column=0, columnspan=4, sticky="ew", pady=(14, 8))
-        ttk.Label(main, text="Multi-Connection (Top-Level 'connections')", font=("Segoe UI", 12, "bold")).grid(row=20, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        ttk.Label(main, text="Multi-Connection", font=("Segoe UI", 12, "bold")).grid(row=20, column=0, columnspan=4, sticky="w", pady=(0, 8))
         self.conn_info_var = tk.StringVar(value=self._connections_summary())
-        ttk.Label(main, textvariable=self.conn_info_var).grid(row=21, column=0, columnspan=3, sticky="w")
-        btns_json = ttk.Frame(main); btns_json.grid(row=21, column=3, sticky="e")
-        ttk.Button(btns_json, text="Import JSON…", command=self._import_json, bootstyle=INFO).pack(side="left", padx=4)
-        ttk.Button(btns_json, text="Export JSON…", command=self._export_json).pack(side="left")
+        ttk.Label(main, textvariable=self.conn_info_var).grid(row=21, column=0, columnspan=2, sticky="w")
+        btn_group = ttk.Frame(main); btn_group.grid(row=21, column=2, columnspan=2, sticky="e")
+        ttk.Button(btn_group, text="Quick Add Connection…", command=self._quick_add_connection).pack(side="left", padx=(0,6))
+        ttk.Button(btn_group, text="Import JSON…", command=self._import_json, bootstyle=INFO).pack(side="left")
 
         # Bottom buttons
         btns = ttk.Frame(main)
@@ -711,13 +951,17 @@ class SettingsDialog:
                 self.window.after(0, lambda: messagebox.showerror("vMix", f"Connection failed:\n{e}"))
         asyncio.run_coroutine_threadsafe(_task(), asyncio.get_event_loop())
 
-    # ---- Connections import/export
+    # ---- Quick Add + JSON import
     def _connections_summary(self) -> str:
         n = len(self.connections)
-        if n == 0:
-            return "No connections configured."
-        names = ", ".join((c.get("name") or f"#{i+1}") for i, c in enumerate(self.connections))
-        return f"{n} connection(s): {names}"
+        return f"Imported connections: {n}" if n else "No imported connections."
+
+    def _quick_add_connection(self):
+        def _on_save(new_conn: Dict[str, Any]):
+            self.connections.append(new_conn)
+            self.conn_info_var.set(self._connections_summary())
+            messagebox.showinfo("Connection", f"Added “{new_conn.get('name','Connection')}”. Save settings to persist.")
+        ConnectionEditorDialog(self.window, on_save=_on_save).show()
 
     def _import_json(self):
         path = filedialog.askopenfilename(
@@ -741,35 +985,15 @@ class SettingsDialog:
         except Exception as e:
             messagebox.showerror("Import JSON", f"Failed to import:\n{e}")
 
-    def _export_json(self):
-        path = filedialog.asksaveasfilename(
-            title="Export JSON config",
-            defaultextension=".json",
-            initialfile="openlp_vmix_connections.json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-        if not path:
-            return
-        try:
-            payload = {"connections": self.connections}
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            messagebox.showinfo("Export JSON", f"Saved {len(self.connections)} connection(s) to:\n{path}")
-        except Exception as e:
-            messagebox.showerror("Export JSON", f"Failed to export:\n{e}")
-
     # ---- Save settings
     def _save_settings(self):
         try:
             new_settings = {
-                # legacy/single-endpoint (kept for backward compat and quick testing)
                 "vmix_api_url": (self.vmix_api_var.get().strip() or "http://localhost:8088/api"),
                 "openlp_ws_url": (self.openlp_ws_var.get().strip() or "ws://localhost:4317"),
+                "api_port": max(1024, min(65535, int(self.api_port_var.get().strip() or "5000"))),
                 "vmix_title_input": (self.input_var.get().strip() or "SongTitle"),
                 "vmix_title_field": (self.field_var.get().strip() or "Message.Text"),
-
-                # global behavior
-                "api_port": max(1024, min(65535, int(self.api_port_var.get().strip() or "5000"))),
                 "splash_enabled": bool(self.splash_var.get()),
                 "poll_interval_sec": max(1, int(self.poll_var.get().strip() or "2")),
                 "overlay_channel": max(1, min(4, int(self.overlay_var.get().strip() or "1"))),
@@ -780,15 +1004,14 @@ class SettingsDialog:
                 "max_chars_per_line": max(10, int(self.wrap_var.get().strip() or "36")),
                 "clear_on_blank": bool(self.cob_var.get()),
                 "text_layer_above": bool(self.text_layer_above_var.get()),
+                # bring in any quick-added / imported connections
+                "connections": list(self.connections),
             }
         except ValueError as e:
             messagebox.showerror("Settings", f"Invalid numeric value:\n{e}")
             return
 
         try:
-            # IMPORTANT: persist connections at TOP-LEVEL
-            self.config["connections"] = list(self.connections)
-            # then persist other settings via callback (which saves the whole config)
             self.on_apply(new_settings)
             messagebox.showinfo("Settings", "Settings saved.")
             self.window.destroy()
