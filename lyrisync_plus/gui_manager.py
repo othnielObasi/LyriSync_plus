@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Callable, Any, Tuple
 import logging
+from preach_info_db import PreachInfoDB
 
 # -----------------------
 # Logging
@@ -52,7 +53,8 @@ def _default_config() -> Dict[str, Any]:
             "text_layer_above": False,       # optional vMix title layer behavior
 
             # NEW: multi-connection list (each connection has openlp/vmix + mappings)
-            "connections": []
+            "connections": [],
+            "preach_db_path": "lyrisync_preach.db",
         }
     }
 
@@ -302,6 +304,10 @@ class LyriSyncGUI:
         self.action_callback = action_callback
 
         self.discoverer = AsyncVmixDiscoverer()
+        self.preach_db = PreachInfoDB(
+            (self.config.get("settings") or {}).get("preach_db_path", "lyrisync_preach.db")
+        )
+        self._preach_rows: List[Dict[str, Any]] = []
 
         # Window
         self.master.title("LyriSync+")
@@ -324,6 +330,8 @@ class LyriSyncGUI:
         self.refresh_roles_list()
         # Connections initial fill
         self.refresh_connections_list()
+        # Preach info initial fill
+        self.refresh_preach_list()
 
         # Close handling
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -383,14 +391,17 @@ class LyriSyncGUI:
         self.roles_frame = ttk.Frame(notebook)
         self.connections_frame = ttk.Frame(notebook)
         self.status_frame = ttk.Frame(notebook)
+        self.preach_frame = ttk.Frame(notebook)
 
         notebook.add(self.roles_frame, text="🎭 Roles & Decks")
         notebook.add(self.connections_frame, text="🔗 Connections")
         notebook.add(self.status_frame, text="📡 Live Status")
+        notebook.add(self.preach_frame, text="📖 Preach Info")
 
         self._build_roles_tab()
         self._build_connections_tab()
         self._build_status_tab()
+        self._build_preach_tab()
 
     def _led_group(self, parent: ttk.Frame, caption: str) -> ttk.Label:
         frame = ttk.Frame(parent)
@@ -679,6 +690,143 @@ class LyriSyncGUI:
         text_wrap_frame.columnconfigure(0, weight=1)
         text_wrap_frame.rowconfigure(0, weight=1)
 
+    # -------------------
+    # Preach info tab (SQLite-backed)
+    # -------------------
+    def _build_preach_tab(self):
+        outer = ttk.Frame(self.preach_frame)
+        outer.pack(fill="both", expand=True, padx=10, pady=10)
+
+        tree_wrap = ttk.Frame(outer)
+        tree_wrap.pack(fill="both", expand=True)
+
+        yscroll = ttk.Scrollbar(tree_wrap)
+        yscroll.pack(side="right", fill="y")
+
+        self.preach_tree = ttk.Treeview(
+            tree_wrap,
+            columns=("ID", "Name", "Title", "Scriptures", "Inspirations", "Subjects"),
+            show="headings",
+            height=12,
+            yscrollcommand=yscroll.set,
+        )
+        yscroll.config(command=self.preach_tree.yview)
+
+        self.preach_tree.heading("ID", text="ID")
+        self.preach_tree.heading("Name", text="Preacher Name")
+        self.preach_tree.heading("Title", text="Message Title")
+        self.preach_tree.heading("Scriptures", text="Scriptures")
+        self.preach_tree.heading("Inspirations", text="Inspirations")
+        self.preach_tree.heading("Subjects", text="Subjects")
+
+        self.preach_tree.column("ID", width=55, anchor="center")
+        self.preach_tree.column("Name", width=150)
+        self.preach_tree.column("Title", width=170)
+        self.preach_tree.column("Scriptures", width=180)
+        self.preach_tree.column("Inspirations", width=200)
+        self.preach_tree.column("Subjects", width=170)
+        self.preach_tree.pack(fill="both", expand=True)
+
+        manage = ttk.Frame(outer)
+        manage.pack(fill="x", pady=(8, 4))
+        ttk.Button(manage, text="➕ Add", command=self._add_preach).pack(side="left", padx=5)
+        ttk.Button(manage, text="✏️ Edit", command=self._edit_preach).pack(side="left", padx=5)
+        ttk.Button(manage, text="❌ Delete", command=self._delete_preach, bootstyle=DANGER).pack(side="left", padx=5)
+        ttk.Button(manage, text="🔄 Refresh", command=self.refresh_preach_list).pack(side="left", padx=5)
+
+        overlays = ttk.LabelFrame(outer, text="Display as Overlay", padding=10)
+        overlays.pack(fill="x", pady=(6, 4))
+        ttk.Label(
+            overlays,
+            text="Select one row, then press a field to send it live to the configured vMix title overlay.",
+        ).pack(anchor="w", pady=(0, 8))
+
+        btns = ttk.Frame(overlays)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Name", command=lambda: self._show_preach_field("name"), bootstyle=INFO).pack(side="left", padx=5)
+        ttk.Button(btns, text="Title", command=lambda: self._show_preach_field("title"), bootstyle=INFO).pack(side="left", padx=5)
+        ttk.Button(btns, text="Scriptures", command=lambda: self._show_preach_field("scriptures"), bootstyle=INFO).pack(side="left", padx=5)
+        ttk.Button(btns, text="Inspirations", command=lambda: self._show_preach_field("inspirations"), bootstyle=INFO).pack(side="left", padx=5)
+        ttk.Button(btns, text="Subjects", command=lambda: self._show_preach_field("subjects"), bootstyle=INFO).pack(side="left", padx=5)
+
+    def refresh_preach_list(self):
+        try:
+            for iid in self.preach_tree.get_children():
+                self.preach_tree.delete(iid)
+            self._preach_rows = self.preach_db.list_entries()
+            for row in self._preach_rows:
+                self.preach_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        row.get("id"),
+                        row.get("name", ""),
+                        row.get("title", ""),
+                        row.get("scriptures", ""),
+                        row.get("inspirations", ""),
+                        row.get("subjects", ""),
+                    ),
+                )
+        except Exception as e:
+            logger.error("Refresh preach info failed: %s", e)
+            messagebox.showerror("Preach Info", f"Failed to load preach info:\n{e}")
+
+    def _selected_preach_row(self) -> Optional[Dict[str, Any]]:
+        sel = self.preach_tree.selection()
+        if not sel:
+            return None
+        idx = self.preach_tree.index(sel[0])
+        if idx < 0 or idx >= len(self._preach_rows):
+            return None
+        return self._preach_rows[idx]
+
+    def _add_preach(self):
+        PreachInfoEditorDialog(self.master, on_save=self._on_preach_created).show()
+
+    def _edit_preach(self):
+        row = self._selected_preach_row()
+        if not row:
+            messagebox.showwarning("Preach Info", "Select a record to edit.")
+            return
+        PreachInfoEditorDialog(self.master, on_save=self._on_preach_updated, seed=row).show()
+
+    def _delete_preach(self):
+        row = self._selected_preach_row()
+        if not row:
+            return
+        label = row.get("title") or row.get("name") or f"ID {row.get('id')}"
+        if messagebox.askyesno("Delete", f"Delete preach info '{label}'?"):
+            try:
+                self.preach_db.delete_entry(int(row.get("id")))
+                self.refresh_preach_list()
+            except Exception as e:
+                messagebox.showerror("Delete", f"Failed to delete record:\n{e}")
+
+    def _on_preach_created(self, payload: Dict[str, Any]):
+        self.preach_db.create_entry(payload)
+        self.refresh_preach_list()
+
+    def _on_preach_updated(self, payload: Dict[str, Any]):
+        row_id = int(payload.get("id"))
+        self.preach_db.update_entry(row_id, payload)
+        self.refresh_preach_list()
+
+    def _show_preach_field(self, field_name: str):
+        row = self._selected_preach_row()
+        if not row:
+            messagebox.showwarning("Preach Info", "Select one record first.")
+            return
+        text = (row.get(field_name) or "").strip()
+        if not text:
+            messagebox.showwarning("Preach Info", f"Selected record has no {field_name}.")
+            return
+        if callable(self.action_callback):
+            try:
+                self.action_callback(("set_lyrics_text", text))
+                self.action_callback("show_lyrics")
+            except Exception as e:
+                messagebox.showerror("Overlay", f"Failed to show overlay text:\n{e}")
+
     def _autogrow_text(self, event=None):
         """Auto-adjust Text height between 2 and 6 lines based on content."""
         try:
@@ -741,6 +889,80 @@ class LyriSyncGUI:
     def _apply_settings(self, new_settings: Dict[str, Any]):
         self.config["settings"] = new_settings
         save_config(self.config)
+
+
+# =======================
+# Preach Info Editor
+# =======================
+class PreachInfoEditorDialog:
+    def __init__(
+        self,
+        parent,
+        on_save: Callable[[Dict[str, Any]], None],
+        seed: Optional[Dict[str, Any]] = None,
+    ):
+        self.parent = parent
+        self.on_save = on_save
+        self.seed = seed or {}
+        self.window: Optional[tk.Toplevel] = None
+
+    def show(self):
+        self.window = tk.Toplevel(self.parent)
+        self.window.title("Preach Info")
+        self.window.geometry("620x470")
+        self.window.transient(self.parent)
+        self.window.grab_set()
+
+        frm = ttk.Frame(self.window, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        self.name_var = tk.StringVar(value=self.seed.get("name", ""))
+        self.title_var = tk.StringVar(value=self.seed.get("title", ""))
+        self.scriptures_var = tk.StringVar(value=self.seed.get("scriptures", ""))
+        self.subjects_var = tk.StringVar(value=self.seed.get("subjects", ""))
+
+        ttk.Label(frm, text="Preacher Name:").grid(row=0, column=0, sticky="w", pady=6)
+        ttk.Entry(frm, textvariable=self.name_var, width=50).grid(row=0, column=1, sticky="ew", padx=8)
+
+        ttk.Label(frm, text="Title:").grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Entry(frm, textvariable=self.title_var, width=50).grid(row=1, column=1, sticky="ew", padx=8)
+
+        ttk.Label(frm, text="Scriptures:").grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Entry(frm, textvariable=self.scriptures_var, width=50).grid(row=2, column=1, sticky="ew", padx=8)
+
+        ttk.Label(frm, text="Subjects:").grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Entry(frm, textvariable=self.subjects_var, width=50).grid(row=3, column=1, sticky="ew", padx=8)
+
+        ttk.Label(frm, text="Inspirations:").grid(row=4, column=0, sticky="nw", pady=6)
+        self.inspirations_text = tk.Text(frm, height=10, width=52, wrap="word", font=("Segoe UI", 10))
+        self.inspirations_text.grid(row=4, column=1, sticky="nsew", padx=8, pady=6)
+        self.inspirations_text.insert("1.0", self.seed.get("inspirations", ""))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="Save", command=self._save, bootstyle=SUCCESS).pack(side="left", padx=6)
+        ttk.Button(btns, text="Cancel", command=self.window.destroy).pack(side="left")
+
+        frm.columnconfigure(1, weight=1)
+        frm.rowconfigure(4, weight=1)
+
+    def _save(self):
+        try:
+            payload = {
+                "name": (self.name_var.get() or "").strip(),
+                "title": (self.title_var.get() or "").strip(),
+                "scriptures": (self.scriptures_var.get() or "").strip(),
+                "inspirations": (self.inspirations_text.get("1.0", "end-1c") or "").strip(),
+                "subjects": (self.subjects_var.get() or "").strip(),
+            }
+            if self.seed.get("id") is not None:
+                payload["id"] = int(self.seed["id"])
+            if not any(payload.get(k) for k in ("name", "title", "scriptures", "inspirations", "subjects")):
+                raise ValueError("Please fill at least one field.")
+            self.on_save(payload)
+            self.window.destroy()
+        except Exception as e:
+            messagebox.showerror("Preach Info", str(e))
 
 
 # =======================
@@ -1006,6 +1228,7 @@ class SettingsDialog:
                 "text_layer_above": bool(self.text_layer_above_var.get()),
                 # bring in any quick-added / imported connections
                 "connections": list(self.connections),
+                "preach_db_path": self.config.get("settings", {}).get("preach_db_path", "lyrisync_preach.db"),
             }
         except ValueError as e:
             messagebox.showerror("Settings", f"Invalid numeric value:\n{e}")

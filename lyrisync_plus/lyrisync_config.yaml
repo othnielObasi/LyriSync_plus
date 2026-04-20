@@ -30,6 +30,7 @@ settings:
   overlay_channel: 1             # vMix overlay channel (1–4)
   clear_on_blank: true           # Clear text when OpenLP slide is blank
   splash_enabled: true           # Show splash on startup
+  preach_db_path: "lyrisync_preach.db" # SQLite DB path for Preach Info records
 
 # --- UI theme (changed from the app’s Theme dropdown) ---
 ui:
