@@ -1,20 +1,20 @@
 # lyrisync_plus.spec
 # PyInstaller spec for LyriSync+
-# Generates a single-windowed EXE, bundling splash image and including async deps.
+# Generates a single-windowed EXE, bundling splash/image/config and async deps.
 
 from PyInstaller.utils.hooks import collect_submodules
 import os
 
 block_cipher = None
 
-# If you keep the splash.png with your code, this picks it up
 datas = []
 if os.path.exists('splash.png'):
     datas.append(('splash.png', '.'))
+if os.path.exists('iconLyriSync.ico'):
+    datas.append(('iconLyriSync.ico', '.'))
 
-# If you ship any default config file, add it here too (optional)
-# if os.path.exists('lyrisync_config.yaml'):
-#     datas.append(('lyrisync_config.yaml', '.'))
+if os.path.exists('lyrisync_config.yaml'):
+    datas.append(('lyrisync_config.yaml', '.'))
 
 # Some ttkbootstrap themes or resources are auto-collected by PyInstaller,
 # but this makes sure hidden modules are included.
@@ -58,8 +58,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,       # set to 'app.ico' if you have one and add to datas
+    icon='iconLyriSync.ico' if os.path.exists('iconLyriSync.ico') else None,
 )
 
-# Onefile is convenient for distribution
-coll = COLLECT(exe, a.binaries, a.zipfiles, a.datas, strip=False, upx=True, upx_exclude=[], name='LyriSyncPlus')
+# Intentionally no COLLECT step for a one-file executable build.

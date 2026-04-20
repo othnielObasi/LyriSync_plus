@@ -8,6 +8,7 @@ Sync OpenLP lyrics to vMix titles with Stream Deck/Companion support and a moder
 - GUI: Theme switcher, status indicators, Live Status test controls
 - **Settings dialog**: URLs/ports, overlay channel & modes, idle auto-clear, soft-wrap width, **Clear on Blank Slide**
 - vMix **Input & Field discovery** + quick **Test Send / Clear / Overlay In/Out**
+- **Preach Info database tab** (SQLite): manage preacher `name`, `title`, `scriptures`, `inspirations`, `subjects` and push any field live as overlay text
 - HTTP API for Companion: `/api/show_lyrics`, `/api/clear_lyrics`, `/api/toggle_overlay`, `/api/start_recording`, `/api/stop_recording`, `/api/status`
 - Packaging: PyInstaller batch, installer scripts (Inno/NSIS), splash & icon
 
@@ -27,8 +28,10 @@ See `lyrisync_config.yaml` → `settings`.
 - `auto_clear_idle_sec` (0=off)
 - `max_chars_per_line`
 - `clear_on_blank` (instant clear on OpenLP blank)
+- `preach_db_path` (SQLite file path for Preach Info records)
 
 ## Build EXE
 ```
-pyinstaller --onefile --windowed --icon=iconLyriSync.ico main.py
+cd lyrisync_plus
+build_exe.bat
 ```
