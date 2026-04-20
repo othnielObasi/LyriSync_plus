@@ -1221,6 +1221,10 @@ class SettingsDialog:
     # ---- Save settings
     def _save_settings(self):
         try:
+            db_path_from_ui = ""
+            if hasattr(self, "preach_db_path_var"):
+                db_path_from_ui = (self.preach_db_path_var.get() or "").strip()
+            saved_db_path = (self.config.get("settings", {}) or {}).get("preach_db_path", "lyrisync_preach.db")
             new_settings = {
                 "vmix_api_url": (self.vmix_api_var.get().strip() or "http://localhost:8088/api"),
                 "openlp_ws_url": (self.openlp_ws_var.get().strip() or "ws://localhost:4317"),
@@ -1239,7 +1243,8 @@ class SettingsDialog:
                 "text_layer_above": bool(self.text_layer_above_var.get()),
                 # bring in any quick-added / imported connections
                 "connections": list(self.connections),
-                "preach_db_path": (self.preach_db_path_var.get().strip() or "lyrisync_preach.db"),
+                # prefer UI value when available; otherwise preserve existing config
+                "preach_db_path": (db_path_from_ui or saved_db_path),
             }
         except ValueError as e:
             messagebox.showerror("Settings", f"Invalid numeric value:\n{e}")
